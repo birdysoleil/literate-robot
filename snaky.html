@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Jeu de Serpent Autonome - Plein écran Navigateur</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: linear-gradient(45deg, #1a2a6c, #b21f1f, #fdbb2d);
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: #fff;
+      text-align: center;
+    }
+    h1 {
+      margin-top: 20px;
+    }
+    #controls {
+      margin: 10px;
+    }
+    button, input[type="range"] {
+      font-size: 16px;
+      margin: 5px;
+      padding: 5px 10px;
+    }
+    #vitesseAffichage {
+      font-size: 16px;
+      margin-left: 5px;
+    }
+    canvas {
+      background: rgba(0, 0, 0, 0.85);
+      display: block;
+      margin: 20px auto;
+      border: 3px solid #fff;
+      box-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+      border-radius: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Jeu de Serpent Autonome</h1>
+  
+  <div id="controls">
+    <button id="startBtn">Démarrer</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="fullscreenBtn">Plein écran</button>
+    <br>
+    <label for="vitesse">Vitesse (ms entre ticks) :</label>
+    <input type="range" id="vitesse" min="50" max="500" step="50" value="200">
+    <span id="vitesseAffichage">200</span> ms
+  </div>
+  
+  <!-- Terrain de jeu agrandi -->
+  <canvas id="jeu" width="800" height="600"></canvas>
+
+  <script>
+    /********** Paramètres généraux **********/
+    const canvas = document.getElementById('jeu');
+    const ctx = canvas.getContext('2d');
+    const tailleCase = 20;
+    const nbColonnes = canvas.width / tailleCase; // 800 / 20 = 40 colonnes
+    const nbLignes = canvas.height / tailleCase;   // 600 / 20 = 30 lignes
+
+    // Variables de contrôle de la simulation
+    let gameSpeed = 200; // ms entre deux ticks
+    let isRunning = false;
+    let isPaused = false;
+    let animationFrameId; // pour pouvoir annuler l'animation
+
+    // Contrôle de la vitesse via le variateur
+    const vitesseInput = document.getElementById('vitesse');
+    const vitesseAffichage = document.getElementById('vitesseAffichage');
+    vitesseInput.addEventListener('input', () => {
+      gameSpeed = parseInt(vitesseInput.value);
+      vitesseAffichage.innerText = gameSpeed;
+    });
+
+    // Boutons
+    const startBtn = document.getElementById('startBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const fullscreenBtn = document.getElementById('fullscreenBtn');
+
+    startBtn.addEventListener('click', () => {
+      if (!isRunning) {
+        isRunning = true;
+        isPaused = false;
+        startGame();
+      }
+    });
+
+    pauseBtn.addEventListener('click', () => {
+      if (!isRunning) return;
+      isPaused = !isPaused;
+      pauseBtn.innerText = isPaused ? "Continuer" : "Pause";
+      if (!isPaused) {
+        tick();
+      }
+    });
+
+    // Pour mettre le navigateur en plein écran (document entier)
+    fullscreenBtn.addEventListener('click', () => {
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else {
+        // Demande de plein écran sur l'élément racine
+        document.documentElement.requestFullscreen().catch(err => {
+          alert(`Erreur lors du passage en plein écran : ${err.message}`);
+        });
+      }
+    });
+
+    /********** Classe Nourriture **********/
+    class Nourriture {
+      constructor() {
+        this.position = this.genererPosition();
+      }
+      genererPosition() {
+        return {
+          x: Math.floor(Math.random() * nbColonnes),
+          y: Math.floor(Math.random() * nbLignes)
+        };
+      }
+      dessiner() {
+        ctx.fillStyle = 'yellow';
+        ctx.beginPath();
+        ctx.arc((this.position.x + 0.5) * tailleCase, (this.position.y + 0.5) * tailleCase, tailleCase/2 - 2, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+      repositionner() {
+        this.position = this.genererPosition();
+      }
+    }
+
+    /********** Fonction utilitaire Flood Fill **********/
+    // Calcule le nombre de cases accessibles depuis (x, y) en évitant les obstacles.
+    // obstacles est un Set contenant des clés "x_y" pour chaque case occupée.
+    function calculerZoneAccessible(x, y, obstacles) {
+      const visited = new Set();
+      const queue = [];
+      let count = 0;
+      const key = (x, y) => `${x}_${y}`;
+      
+      queue.push({x, y});
+      visited.add(key(x, y));
+
+      while(queue.length > 0) {
+        const current = queue.shift();
+        count++;
+        const voisins = [
+          { x: current.x - 1, y: current.y },
+          { x: current.x + 1, y: current.y },
+          { x: current.x, y: current.y - 1 },
+          { x: current.x, y: current.y + 1 }
+        ];
+        for (let v of voisins) {
+          if (v.x < 0 || v.x >= nbColonnes || v.y < 0 || v.y >= nbLignes) continue;
+          if (obstacles.has(key(v.x, v.y))) continue;
+          if (visited.has(key(v.x, v.y))) continue;
+          visited.add(key(v.x, v.y));
+          queue.push(v);
+        }
+      }
+      return count;
+    }
+
+    /********** Fonction utilitaire : Dessiner un rectangle arrondi **********/
+    function dessinerRectArrondi(x, y, w, h, radius, couleur) {
+      ctx.fillStyle = couleur;
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.lineTo(x + w - radius, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+      ctx.lineTo(x + w, y + h - radius);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+      ctx.lineTo(x + radius, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+      ctx.lineTo(x, y + radius);
+      ctx.quadraticCurveTo(x, y, x + radius, y);
+      ctx.fill();
+    }
+
+    /********** Classe Serpent **********/
+    class Serpent {
+      constructor(id, couleur) {
+        this.id = id;
+        this.couleur = couleur;
+        this.initialiser();
+      }
+      initialiser() {
+        // Position de départ aléatoire dans la grille
+        this.tete = {
+          x: Math.floor(Math.random() * nbColonnes),
+          y: Math.floor(Math.random() * nbLignes)
+        };
+        this.corps = [ { ...this.tete } ]; // Corps initial : uniquement la tête
+        // Direction initiale aléatoire parmi les 4 possibles
+        const directions = ['gauche', 'droite', 'haut', 'bas'];
+        this.direction = directions[Math.floor(Math.random() * directions.length)];
+        this.alive = true;
+      }
+      
+      /********** Méthode de dessin réaliste **********/
+      dessiner() {
+        // Dessiner le corps (à partir du deuxième segment)
+        for (let i = 1; i < this.corps.length; i++) {
+          const segment = this.corps[i];
+          const x = segment.x * tailleCase;
+          const y = segment.y * tailleCase;
+          dessinerRectArrondi(x + 2, y + 2, tailleCase - 4, tailleCase - 4, 5, this.couleur);
+        }
+        // Dessiner la tête avec yeux
+        ctx.fillStyle = this.couleur;
+        ctx.beginPath();
+        ctx.arc((this.tete.x + 0.5) * tailleCase, (this.tete.y + 0.5) * tailleCase, tailleCase/2 - 1, 0, 2 * Math.PI);
+        ctx.fill();
+        // Dessiner les yeux en fonction de la direction
+        ctx.fillStyle = 'white';
+        let offsetX = 0, offsetY = 0;
+        switch(this.direction) {
+          case 'gauche': offsetX = -4; break;
+          case 'droite': offsetX = 4; break;
+          case 'haut': offsetY = -4; break;
+          case 'bas': offsetY = 4; break;
+        }
+        // Oeil gauche
+        ctx.beginPath();
+        ctx.arc((this.tete.x + 0.4) * tailleCase + offsetX, (this.tete.y + 0.4) * tailleCase + offsetY, 3, 0, 2 * Math.PI);
+        ctx.fill();
+        // Oeil droit
+        ctx.beginPath();
+        ctx.arc((this.tete.x + 0.6) * tailleCase + offsetX, (this.tete.y + 0.4) * tailleCase + offsetY, 3, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+      
+      /********** Méthode de déplacement avancée **********/
+      deplacer(nourritures, tousLesSerpents) {
+        if (!this.alive) return;
+        
+        // Identifier la pomme la plus proche (distance de Manhattan)
+        let cible = this.trouverNourritureProche(nourritures);
+        
+        const directionsPossibles = [
+          { name: 'gauche', dx: -1, dy: 0 },
+          { name: 'droite', dx: 1, dy: 0 },
+          { name: 'haut', dx: 0, dy: -1 },
+          { name: 'bas', dx: 0, dy: 1 }
+        ];
+        
+        // Préparer les obstacles : toutes les cases occupées par les segments de tous les serpents
+        let obstacles = new Set();
+        for (let s of tousLesSerpents) {
+          if (!s.alive) continue;
+          for (let part of s.corps) {
+            obstacles.add(`${part.x}_${part.y}`);
+          }
+        }
+        
+        let candidats = [];
+        for (const move of directionsPossibles) {
+          let newX = this.tete.x + move.dx;
+          let newY = this.tete.y + move.dy;
+          let safe = true;
+          // Vérifier les bornes de la grille
+          if (newX < 0 || newX >= nbColonnes || newY < 0 || newY >= nbLignes) {
+            safe = false;
+          }
+          // Vérifier la collision immédiate avec un obstacle
+          if (obstacles.has(`${newX}_${newY}`)) {
+            safe = false;
+          }
+          // Calculer la distance à la cible (si disponible)
+          let distance = Infinity;
+          if (cible) {
+            distance = Math.abs(newX - cible.x) + Math.abs(newY - cible.y);
+          }
+          // Calculer la zone accessible via flood fill si le mouvement est sûr
+          let zoneAccessible = 0;
+          if (safe) {
+            zoneAccessible = calculerZoneAccessible(newX, newY, obstacles);
+          }
+          // Score : on favorise une grande zone accessible et une distance réduite vers la pomme
+          let score = zoneAccessible - (distance * 2);
+          candidats.push({ direction: move.name, newX, newY, safe, score });
+        }
+        
+        // Choix du meilleur mouvement parmi ceux sûrs, ou le moins risqué sinon
+        let mouvementsSurs = candidats.filter(c => c.safe);
+        let choix;
+        if (mouvementsSurs.length > 0) {
+          choix = mouvementsSurs.reduce((best, move) => move.score > best.score ? move : best, mouvementsSurs[0]);
+        } else {
+          choix = candidats.reduce((best, move) => move.score > best.score ? move : best, candidats[0]);
+        }
+        
+        this.direction = choix.direction;
+        let nouvelleTete = { x: choix.newX, y: choix.newY };
+        
+        // Vérification finale
+        if (nouvelleTete.x < 0 || nouvelleTete.x >= nbColonnes || nouvelleTete.y < 0 || nouvelleTete.y >= nbLignes) {
+          this.alive = false;
+          return;
+        }
+        if (obstacles.has(`${nouvelleTete.x}_${nouvelleTete.y}`)) {
+          this.alive = false;
+          return;
+        }
+        
+        // Mise à jour du serpent : ajout de la nouvelle tête
+        this.tete = nouvelleTete;
+        this.corps.unshift(nouvelleTete);
+        
+        // Vérifier si une nourriture est mangée
+        let aMange = false;
+        for (let nour of nourritures) {
+          if (nour.position.x === nouvelleTete.x && nour.position.y === nouvelleTete.y) {
+            aMange = true;
+            nour.repositionner();
+            break;
+          }
+        }
+        if (!aMange) {
+          this.corps.pop();
+        }
+      }
+      
+      /********** Méthode pour trouver la pomme la plus proche **********/
+      trouverNourritureProche(nourritures) {
+        if (nourritures.length === 0) return null;
+        let distanceMin = Infinity;
+        let cible = null;
+        for (let nour of nourritures) {
+          let dx = Math.abs(nour.position.x - this.tete.x);
+          let dy = Math.abs(nour.position.y - this.tete.y);
+          let distance = dx + dy;
+          if (distance < distanceMin) {
+            distanceMin = distance;
+            cible = nour.position;
+          }
+        }
+        return cible;
+      }
+    }
+
+    /********** Initialisation **********/
+    // Création de 5 serpents aux couleurs différentes
+    const couleurs = ['#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6'];
+    let serpents = [];
+    for (let i = 0; i < 5; i++) {
+      serpents.push(new Serpent(i, couleurs[i % couleurs.length]));
+    }
+    
+    // Création de 5 nourritures
+    let nourritures = [];
+    for (let i = 0; i < 5; i++) {
+      nourritures.push(new Nourriture());
+    }
+    
+    /********** Boucle de jeu **********/
+    function tick() {
+      if (!isRunning || isPaused) return; // Ne rien faire si le jeu n'est pas lancé ou est en pause
+      
+      // Effacer le canevas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Optionnel : dessiner une grille légère pour visualiser les cases
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      for (let i = 0; i <= nbColonnes; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * tailleCase, 0);
+        ctx.lineTo(i * tailleCase, canvas.height);
+        ctx.stroke();
+      }
+      for (let j = 0; j <= nbLignes; j++) {
+        ctx.beginPath();
+        ctx.moveTo(0, j * tailleCase);
+        ctx.lineTo(canvas.width, j * tailleCase);
+        ctx.stroke();
+      }
+      
+      // Dessiner la nourriture
+      nourritures.forEach(nour => nour.dessiner());
+      
+      // Faire agir et dessiner chaque serpent
+      serpents.forEach(serpent => {
+        if (serpent.alive) {
+          serpent.deplacer(nourritures, serpents);
+          serpent.dessiner();
+        }
+      });
+      
+      // Planifier le prochain tick en fonction de gameSpeed
+      setTimeout(() => {
+        animationFrameId = requestAnimationFrame(tick);
+      }, gameSpeed);
+    }
+    
+    function startGame() {
+      // Réinitialiser les serpents et la nourriture
+      serpents.forEach(s => s.initialiser());
+      nourritures.forEach(nour => nour.repositionner());
+      pauseBtn.innerText = "Pause";
+      isPaused = false;
+      tick();
+    }
+  </script>
+</body>
+</html>
